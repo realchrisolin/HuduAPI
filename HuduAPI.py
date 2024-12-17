@@ -1,11 +1,13 @@
 import time
 import logging
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, List, Union, Iterator, TypeVar, Generic
 import requests
 from dataclasses import dataclass
 from datetime import datetime
 import queue
 import threading
+
+T = TypeVar('T')
 
 
 class RateLimiter:
@@ -96,6 +98,56 @@ class HuduEventBus:
             self._thread.join()
 
 
+class PaginatedResponse(Generic[T]):
+    """Iterator for handling paginated API responses"""
+
+    def __init__(self, client: 'HuduClient', endpoint: str, response_key: str = None, **params):
+        self.client = client
+        self.endpoint = endpoint
+        self.response_key = response_key
+        self.params = params
+        self.current_page = 1
+        self.has_more = True
+        self._current_batch: List[T] = []
+
+    def __iter__(self) -> Iterator[T]:
+        return self
+
+    def __next__(self) -> T:
+        if not self._current_batch and self.has_more:
+            self._fetch_next_batch()
+
+        if not self._current_batch and not self.has_more:
+            raise StopIteration
+
+        return self._current_batch.pop(0)
+
+    def _fetch_next_batch(self) -> None:
+        """Fetch the next batch of results"""
+        self.params['page'] = self.current_page
+        response = self.client._make_request('GET', self.endpoint, params=self.params)
+        data = response.json()
+
+        # Handle different response structures
+        if self.response_key:
+            items = data.get(self.response_key, [])
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = [data] if data else []
+
+        if not items:
+            self.has_more = False
+            return
+
+        self._current_batch.extend(items)
+        self.current_page += 1
+
+    def all(self) -> List[T]:
+        """Retrieve all results as a list"""
+        return list(self)
+
+
 class HuduClient:
     """Main client for interacting with the Hudu API"""
 
@@ -136,9 +188,10 @@ class HuduClient:
             raise
 
     # Companies
-    def get_companies(self, **params) -> Dict[str, Any]:
-        """Get a list of companies with optional filtering"""
-        return self._make_request('GET', 'companies', params=params).json()
+    def get_companies(self, page_size: int = 25, **params) -> PaginatedResponse[Dict[str, Any]]:
+        """Get a paginated list of companies with optional filtering"""
+        params['page_size'] = page_size
+        return PaginatedResponse(self, 'companies', None, **params)
 
     def create_company(self, company_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new company"""
@@ -149,9 +202,10 @@ class HuduClient:
         return self._make_request('GET', f'companies/{company_id}').json()
 
     # Assets
-    def get_assets(self, **params) -> Dict[str, Any]:
-        """Get a list of assets with optional filtering"""
-        return self._make_request('GET', 'assets', params=params).json()
+    def get_assets(self, page_size: int = 25, **params) -> PaginatedResponse[Dict[str, Any]]:
+        """Get a paginated list of assets with optional filtering"""
+        params['page_size'] = page_size
+        return PaginatedResponse(self, 'assets', 'assets', **params)
 
     def create_asset(self, company_id: int, asset_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new asset for a company"""
@@ -159,9 +213,10 @@ class HuduClient:
                                   json={'asset': asset_data}).json()
 
     # Articles
-    def get_articles(self, **params) -> Dict[str, Any]:
-        """Get a list of articles with optional filtering"""
-        return self._make_request('GET', 'articles', params=params).json()
+    def get_articles(self, page_size: int = 25, **params) -> PaginatedResponse[Dict[str, Any]]:
+        """Get a paginated list of articles with optional filtering"""
+        params['page_size'] = page_size
+        return PaginatedResponse(self, 'articles', None, **params)
 
     def create_article(self, article_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new article"""
@@ -198,16 +253,21 @@ if __name__ == "__main__":
     client.event_bus.subscribe('request_error', lambda e: logging.error(f"API Error: {e.data}"))
 
     try:
-        # Example API calls
-        companies = client.get_companies(page=1)
-        logging.info(f"Found {len(companies)} companies")
+        # Example of iterating through all companies
+        for company in client.get_companies():
+            logging.info(f"Processing company: {company['name']}")
 
-        # Create a new company
-        new_company = client.create_company({
-            'name': 'Test Company',
-            'company_type': 'Client'
-        })
-        logging.info(f"Created company: {new_company['name']}")
+        # Example of getting all companies as a list
+        all_companies = client.get_companies().all()
+        logging.info(f"Found {len(all_companies)} companies")
+
+        # Example with filtering and custom page size
+        recent_articles = client.get_articles(
+            page_size=25,
+            updated_at="2024-01-01T00:00:00Z,"
+        )
+        for article in recent_articles:
+            logging.info(f"Recent article: {article['name']}")
 
     except Exception as e:
         logging.error(f"Error: {e}")
