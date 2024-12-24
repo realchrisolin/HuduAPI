@@ -1,8 +1,8 @@
-# Python Hudu API Client
+# Hudu API Python Client
 
-A Python client for the Hudu API with automatic rate limiting, error handling, and data modeling.
+A Python client for the Hudu REST API with automatic rate limiting, error handling, and data modeling.
 
-> **Note**: This project is a work in progress. The current implementation covers core API endpoints but is not a complete implementation of the Hudu API specification.
+> **Note**: This project is a work in progress. The current implementation covers core API endpoints but is not a complete implementation of the Hudu API specification. PRs are welcome.
 
 ## Features
 
@@ -48,10 +48,6 @@ if result.is_success():
     for company in companies:
         print(f"Company: {company.name}")
 ```
-
-## API Documentation
-
-This client is an indie Available endpoints include Companies, Assets, Asset Layouts, Articles, Asset Passwords, Relations, and Uploads.
 
 ## Error Handling
 
