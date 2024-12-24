@@ -1,8 +1,8 @@
 import os
-from typing import Optional, List
+from typing import Optional, List, Any
 from dotenv import load_dotenv
 from uplink import Consumer, get, post, put, delete, returns, json, Path, Query, Body, response_handler, headers
-from pydantic import BaseModel, Field
+import pydantic
 from functools import partial, wraps
 import backoff
 import requests
@@ -41,11 +41,69 @@ class RateLimitedConsumer:
 
         return wrapped
 
+class BaseModel(pydantic.BaseModel):
+    model_config = {
+        "arbitrary_types_allowed": True,
+        "json_serialization": True,
+        "ser_json_timedelta": "iso8601",
+        "ser_json_bytes": "base64",
+        "ser_json_inf_nan": "null",
+        "validate_assignment": True
+    }
+
+    def pretty_print(self, indent: int = 2) -> str:
+        """Returns a formatted string representation of the model with specified indentation."""
+        import json
+        def json_serializer(obj):
+            if hasattr(obj, 'model_dump'):
+                return obj.model_dump()
+            return str(obj)
+
+        return json.dumps(self.model_dump(), indent=indent, default=json_serializer)
+
+    def __str__(self) -> str:
+        """Provides a readable string representation of the model."""
+        return self.pretty_print()
+
+    def __repr__(self) -> str:
+        """Provides a detailed string representation of the model."""
+        class_name = self.__class__.__name__
+        fields = [f"{key}={repr(value)}" for key, value in self.model_dump().items()]
+        return f"{class_name}({', '.join(fields)})"
 
 # Models
-class Company(BaseModel):
-    model_config = {"arbitrary_types_allowed": True}
+class AssetField(BaseModel):
+    id: int
+    label: Optional[str] = None
+    position: int
+    value: Optional[Any] = None
 
+    def __init__(self, **data):
+        # handle escaped JSON strings in value
+        if isinstance(data.get('value'), str):
+            try:
+                import json
+                if data['value'].startswith('{') and '\\\"' in data['value']:
+                    data['value'] = data['value'].encode('utf-8').decode('unicode_escape')
+                data['value'] = json.loads(data['value'])
+            except json.JSONDecodeError as e:
+                # if parsing fails, keep original string
+                pass
+        super().__init__(**data)
+
+class IntegratorCard(BaseModel):
+    """Represents an Integrator Card (based on the terminology Hudu uses) containing information about an integration with an external system."""
+    id: int
+    integrator_id: int
+    integrator_name: str
+    sync_id: int
+    sync_identifier: Optional[str] = None
+    sync_type: str
+    primary_field: Optional[str] = None
+    link: str
+    data: Optional[dict[str, Any]] = None
+
+class Company(BaseModel):
     id: int
     name: str
     phone_number: Optional[str] = None
@@ -64,11 +122,10 @@ class Company(BaseModel):
 
 
 class Asset(BaseModel):
-    model_config = {"arbitrary_types_allowed": True}
-
     id: int
     name: str
     company_id: int
+    company_name: Optional[str] = None
     asset_layout_id: int
     fields: List[dict]
     primary_serial: Optional[str] = None
@@ -76,11 +133,16 @@ class Asset(BaseModel):
     primary_model: Optional[str] = None
     primary_manufacturer: Optional[str] = None
     archived: Optional[bool] = None
+    object_type: Optional[str] = None
+    asset_type: Optional[str] = None
+    url: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    fields: Optional[List[AssetField]] = None
+    cards: Optional[List[IntegratorCard]] = None
 
 
 class AssetLayout(BaseModel):
-    model_config = {"arbitrary_types_allowed": True}
-
     id: int
     name: str
     icon: Optional[str] = None
@@ -94,8 +156,6 @@ class AssetLayout(BaseModel):
 
 
 class AssetPassword(BaseModel):
-    model_config = {"arbitrary_types_allowed": True}
-
     id: int
     passwordable_id: Optional[int]
     passwordable_type: Optional[str] = None
@@ -116,8 +176,6 @@ class AssetPassword(BaseModel):
 
 
 class Article(BaseModel):
-    model_config = {"arbitrary_types_allowed": True}
-
     id: int
     name: str
     content: Optional[str] = None
@@ -127,8 +185,6 @@ class Article(BaseModel):
     draft: bool = False
 
 class Relations(BaseModel):
-    model_config = {"arbitrary_types_allowed": True}
-
     id: int
     description: Optional[str] = None
     is_inverse: Optional[bool] = None
@@ -140,8 +196,6 @@ class Relations(BaseModel):
     toable_url: Optional[str] = None
 
 class Uploads(BaseModel):
-    model_config = {"arbitrary_types_allowed": True}
-
     id: int
     url: Optional[str] = None
     name: Optional[str] = None
@@ -257,7 +311,7 @@ class HuduAPI(Consumer):
     # Assets endpoints
     @returns.json
     @get("companies/{company_id}/assets")
-    def get_assets(self,
+    def get_company_assets(self,
                    company_id: Path("company_id"),
                    page: Query("page") = 1,
                    page_size: Query("page_size") = 25,
@@ -268,8 +322,24 @@ class HuduAPI(Consumer):
 
     @returns.json
     @get("companies/{company_id}/assets/{asset_id}")
-    def get_asset(self, company_id: Path("company_id"), asset_id: Path("asset_id")) -> dict:
+    def get_company_asset(self, company_id: Path("company_id"), asset_id: Path("asset_id")) -> dict:
         """Get a specific asset"""
+
+    @returns.json
+    @get("assets")
+    def get_assets(self,
+                   page: Query("page") = 1,
+                   page_size: Query("page_size") = 25,
+                   id: Query("id") = None,
+                   name: Query("name") = None,
+                   primary_serial: Query("primary_serial") = None,
+                   asset_layout_id: Query("asset_layout_id") = None,
+                   archived: Query("archived") = bool,
+                   slug: Query("slug") = None,
+                   search: Query("search") = None,
+                   updated_at: Query("updated_at") = None
+                   ) -> List[dict]:
+        """Get all assets"""
 
     @returns.json
     @post("companies/{company_id}/assets")
@@ -420,16 +490,22 @@ class HuduClient:
             lambda: self.api.delete_company(company_id=company_id)
         )
 
-    def get_assets(self, company_id: int, **kwargs) -> Result[List[Asset], HuduApiError]:
+    def get_company_assets(self, company_id: int, **kwargs) -> Result[List[Asset], HuduApiError]:
         """Get assets for a company"""
         return self._handle_response(
             lambda: [Asset(**a) for a in self.api.get_assets(company_id=company_id, **kwargs)[0]['assets']]
         )
 
-    def get_asset(self, company_id: int, asset_id: int) -> Result[Asset, HuduApiError]:
-        """Get a specific asset"""
+    def get_company_asset(self, company_id: int, asset_id: int) -> Result[Asset, HuduApiError]:
+        """Get a specific company asset"""
         return self._handle_response(
             lambda: Asset(**self.api.get_asset(company_id=company_id, asset_id=asset_id)[0]['asset'])
+        )
+
+    def get_assets(self, **kwargs) -> Result[List[Asset], HuduApiError]:
+        """Get assets"""
+        return self._handle_response(
+            lambda: [Asset(**a) for a in self.api.get_assets(**kwargs)[0]['assets']]
         )
 
     def create_asset(self, company_id: int, asset: Asset) -> Result[Asset, HuduApiError]:
